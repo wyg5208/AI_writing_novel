@@ -1,0 +1,63 @@
+# 项目生成的小说文件夹
+generated_novels/
+
+# Python环境文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+ENV/
+.env
+.venv
+env/
+env.bak/
+venv.bak/
+
+# IDE配置文件
+.idea/
+.vscode/
+*.swp
+*.swo
+.project
+.pydevproject
+.settings/
+
+# 操作系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 日志文件
+*.log
+logs/
+
+# 本地配置文件（可能包含敏感信息）
+config.local.json
+secrets.json
+
+# 临时文件
+*.tmp
+temp/ 
