@@ -12,11 +12,18 @@
 - 💾 **自动保存功能**：创作完成后自动保存为TXT文件，文件名包含字数和时间戳
 - 📊 **实时状态监控**：显示当前创作状态和已生成字数
 - 🎮 **灵活控制选项**：可随时开始、暂停或停止创作过程
+- 🧠 **思维推理展示**：实时显示AI的思考过程，了解创作背后的逻辑
+- ⭐ **质量评估系统**：对生成的小说进行多维度质量评估，打分并提供改进建议
+- 🔧 **智能修改建议**：根据评估结果自动生成具体修改建议，并支持一键应用修改
+- 📋 **内容复制功能**：一键复制生成的内容到剪贴板
+- 📖 **Markdown格式阅读**：支持Markdown格式显示，提升阅读体验
+- 📑 **DOCX导出功能**：将生成的小说导出为Word文档格式
 
 ## 系统要求
 
 - Python 3.7+
 - [OLLAMA](https://ollama.ai/) 或其他支持API访问的本地大语言模型
+- 必要的Python库（详见安装步骤）
 
 ## 安装步骤
 
@@ -30,16 +37,15 @@ cd AI_writing_novel
 ### 2. 安装依赖
 
 ```bash
-pip install -r requirements.txt
+pip install requests tkinter pyperclip markdown tkhtmlview python-docx
 ```
 
 ### 3. 安装并配置OLLAMA
 
 1. 从[OLLAMA官网](https://ollama.ai/)下载并安装
-2. 拉取所需模型（推荐使用qwen、llama2等支持中文的模型）：
+2. 拉取所需模型（推荐使用支持中文的大模型）：
 
 ```bash
-ollama pull qwq:latest
 ollama pull huihui_ai/qwen2.5-1m-abliterated:14b
 ```
 
@@ -65,6 +71,21 @@ python writing_novel.py
    - 每篇小说完成后会自动保存并开始创作下一篇
    - 点击"停止自动生成"可以退出自动模式
 
+3. **思维推理查看**：
+   - 在生成过程中，右侧面板会实时显示AI的思考过程
+   - 这些思考不会出现在最终故事中，但可以帮助理解创作逻辑
+
+4. **质量评估与修改**：
+   - 小说生成完成后，点击"质量评估"按钮
+   - 系统会对小说进行多维度评估并打分
+   - 点击"获取修改建议"可查看具体改进方案
+   - 点击"应用修改"可自动根据建议优化小说
+
+5. **内容格式与导出**：
+   - 点击"复制内容"可将小说复制到剪贴板
+   - 点击"Markdown格式阅读"可切换显示模式
+   - 点击"导出DOCX"可保存为Word文档
+
 ### 查看创作结果
 
 所有生成的小说都保存在`generated_novels`文件夹中，文件名格式为`[字数]字_[时间戳].txt`。
@@ -76,10 +97,20 @@ python writing_novel.py
 在`writing_novel.py`文件中，找到以下代码行：
 
 ```python
-model_name = 'huihui_ai/qwen2.5-1m-abliterated:14b'  # 模型名称
+writing_model_name = 'huihui_ai/qwen2.5-1m-abliterated:14b'  # 用于写作的模型
+evaluation_model_name = 'huihui_ai/qwen2.5-1m-abliterated:14b'  # 用于评估的模型
 ```
 
 将其修改为你想使用的OLLAMA模型名称。
+
+### 使用思维推理标签
+
+AI可以使用`<think></think>`标签来表示思考过程，这部分内容会显示在右侧面板中，不会出现在最终故事中。示例：
+
+```
+<think>我需要构思一个合理的开场白，介绍主角的背景和处境。</think>
+天色渐暗，雨滴敲打在窗户上...
+```
 
 ### 调整生成参数
 
@@ -87,7 +118,7 @@ model_name = 'huihui_ai/qwen2.5-1m-abliterated:14b'  # 模型名称
 
 ```python
 request_data = {
-    "model": model_name,
+    "model": writing_model_name,
     "prompt": full_prompt,
     "max_tokens": 1000000,
     "temperature": 0.7,  # 调整创意程度：值越高，输出越多样
@@ -101,18 +132,23 @@ request_data = {
 
 确保OLLAMA正在运行，并且API端口（默认11434）可访问。检查`http://localhost:11434/api/generate`是否可以访问。
 
-### Q: 生成速度太慢
+### Q: 质量评估功能超时或失败
 
-生成速度主要取决于：
-1. 你的硬件配置（CPU/GPU）
-2. 选择的模型大小
-3. 目标字数设置
+质量评估需要更多计算资源和时间。可以尝试：
+1. 确保评估模型已正确加载
+2. 检查`novel_app.log`日志文件获取详细错误信息
+3. 考虑使用更小的模型或减少评估内容长度
 
-可以尝试使用较小的模型或降低目标字数来提高速度。
+### Q: 思维推理内容没有正确显示
 
-### Q: 按钮点击没有响应
+确保AI正确使用了`<think></think>`标签。如标签拼写错误（如`</thind>`），程序会自动纠正常见错误。
 
-这可能是因为程序正在进行密集计算。耐心等待，或重启应用。
+### Q: Markdown显示或DOCX导出功能异常
+
+确保已安装所有必要的依赖库：
+```bash
+pip install pyperclip markdown tkhtmlview python-docx
+```
 
 ## 高级用法
 
@@ -126,15 +162,22 @@ prompt = '''你是一个创意写作专家，请生成一个有趣的小说写�
 '''
 ```
 
-### 加入自定义主题
+### 自定义评估标准
 
-你可以修改提示词，加入特定主题或风格：
+在`evaluate_novel_thread`函数中，可以修改评估提示词来调整评估维度和关注点：
 
 ```python
-prompt = '''你是一个创意写作专家，请生成一个科幻主题的小说写作要求。要求：
+evaluation_prompt = f'''
+请对以下小说内容进行专业的质量评估，基于以下几个方面:
+1. 情节连贯性和合理性
+2. 人物刻画和发展
 ...
 '''
 ```
+
+### 优化日志系统
+
+程序内置了详细的日志记录功能，所有日志会保存在`novel_app.log`文件中，可用于调试和性能优化。
 
 ## 贡献指南
 

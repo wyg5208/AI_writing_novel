@@ -382,7 +382,7 @@ word_count_entry = tk.Entry(
     relief=tk.SOLID
 )
 word_count_entry.pack(side=tk.LEFT, padx=5)
-word_count_entry.insert(0, "1000")
+word_count_entry.insert(0, "10000")
 
 # 创建控制按钮区域
 button_frame = tk.Frame(main_container, bg='#f0f0f0')
