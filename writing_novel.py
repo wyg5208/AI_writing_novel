@@ -14,6 +14,11 @@ from tkhtmlview import HTMLScrolledText  # 用于显示HTML
 import docx  # 用于创建Word文档
 from docx.shared import Pt
 
+# 长篇分章管线（A+B 最小可用）
+from novel.llm_client import OllamaClient, LLMConfig
+from novel.memory_store import NovelStore
+from novel.pipeline import LongNovelPipeline, PipelineModels, PipelineConfig
+
 # 设置日志记录
 logging.basicConfig(
     level=logging.DEBUG,
@@ -38,6 +43,18 @@ evaluation_model_name = 'huihui_ai/qwen2.5-1m-abliterated:14b'  # 用于评估�
 is_auto_generating = False  # 控制自动生成的标志
 is_evaluating = False  # 控制评估过程的标志
 is_markdown_mode = False  # 控制是否显示为Markdown格式
+
+# 长篇分章写作状态
+current_novel_id = None
+current_novel_state = None
+story_bible_cache = ""  # 用户可编辑的故事圣经（不可违背设定）
+style_guide_cache = "第三人称限知；现代都市言情；节奏紧凑；少复述前情；对话推动关系与情节；避免注水。"
+evaluation_target_text = ""
+evaluation_target_title = ""
+
+# 长篇分章管线依赖
+novel_store = NovelStore(base_dir="generated_novels")
+ollama_client = OllamaClient(LLMConfig(base_url="http://localhost:11434", timeout_s=120))
 
 # 判断写作目标是否完成的方法
 def is_writing_complete(content, target_word_count):
@@ -90,17 +107,36 @@ def generate_user_prompt():
 
 # 保存生成的内容到文件
 def save_content_to_file():
-    if not generated_content.strip():
+    global current_novel_state, current_novel_id
+
+    # 长篇模式：优先导出“整本汇总”
+    export_text = generated_content
+    if current_novel_state and current_novel_state.chapters:
+        parts = []
+        for ch in current_novel_state.chapters:
+            idx = int(ch.get("idx", 0))
+            title = ch.get("title", "").strip()
+            chapter_text = novel_store.load_chapter_text(current_novel_state.novel_id, idx).strip()
+            if not chapter_text:
+                continue
+            heading = f"第{idx}章"
+            if title:
+                heading += f"：{title}"
+            parts.append(heading)
+            parts.append(chapter_text)
+        export_text = "\n\n".join(parts).strip() or generated_content
+
+    if not export_text.strip():
         return
-        
+
     # 确保输出目录存在
     output_dir = "generated_novels"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    
+
     # 计算当前内容的字数
-    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', generated_content))
-    english_words = len(re.findall(r'\b[a-zA-Z]+\b', generated_content))
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', export_text))
+    english_words = len(re.findall(r'\b[a-zA-Z]+\b', export_text))
     total_words = chinese_chars + english_words
     
     # 生成文件名：字数_时间戳.txt
@@ -110,7 +146,7 @@ def save_content_to_file():
     
     try:
         with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(generated_content)
+            f.write(export_text)
         update_status(f"内容已保存至：{filename}")
         
         # 如果是自动生成模式，则继续生成下一个故事
@@ -124,7 +160,141 @@ def save_content_to_file():
 def continue_auto_generate():
     if is_auto_generating and not is_generating:
         if generate_user_prompt():
-            generate_text()
+            generate_text_legacy()
+
+
+# ===== 长篇模式：故事圣经 / 风格约束（可编辑且持久化）=====
+def _default_story_bible_template():
+    return """【世界观/时代/地点】\n- 时代：\n- 城市/地点：\n- 规则（不可违背）：\n\n【主角】\n- 女主：姓名/年龄/职业/外貌/性格底线/目标/伤口\n- 男主：姓名/年龄/职业/外貌/性格底线/目标/伤口\n\n【关系网】\n- 关键配角：姓名—关系—动机—限制\n\n【关键设定】\n- 既定事实（不可更改）：\n- 禁忌/雷点：\n\n【叙事约束】\n- 人称/时态：第三人称限知（建议）\n- 文风：克制、紧凑、少复述前情；用动作/对话推动\n""".strip()
+
+
+def load_long_novel_defaults():
+    global story_bible_cache, style_guide_cache
+    try:
+        base_dir = "generated_novels"
+        os.makedirs(base_dir, exist_ok=True)
+        bible_path = os.path.join(base_dir, "_default_story_bible.txt")
+        style_path = os.path.join(base_dir, "_default_style_guide.txt")
+
+        if os.path.exists(bible_path):
+            with open(bible_path, "r", encoding="utf-8") as f:
+                story_bible_cache = f.read().strip()
+        if not story_bible_cache:
+            story_bible_cache = _default_story_bible_template()
+
+        if os.path.exists(style_path):
+            with open(style_path, "r", encoding="utf-8") as f:
+                style_guide_cache = f.read().strip() or style_guide_cache
+    except Exception as e:
+        logger.warning(f"加载长篇默认配置失败: {e}")
+
+
+def save_long_novel_defaults(story_bible: str, style_guide: str):
+    try:
+        base_dir = "generated_novels"
+        os.makedirs(base_dir, exist_ok=True)
+        bible_path = os.path.join(base_dir, "_default_story_bible.txt")
+        style_path = os.path.join(base_dir, "_default_style_guide.txt")
+        with open(bible_path, "w", encoding="utf-8") as f:
+            f.write((story_bible or "").strip())
+        with open(style_path, "w", encoding="utf-8") as f:
+            f.write((style_guide or "").strip())
+    except Exception as e:
+        logger.warning(f"保存长篇默认配置失败: {e}")
+
+
+def open_story_bible_editor():
+    """打开故事圣经/风格约束编辑窗口。"""
+    global story_bible_cache, style_guide_cache
+
+    win = tk.Toplevel(root)
+    win.title("长篇设置：故事圣经 / 风格约束")
+    win.geometry("900x700")
+    win.configure(bg="#f5f5f7")
+
+    container = tk.Frame(win, bg="#f5f5f7")
+    container.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+
+    tk.Label(
+        container,
+        text="故事圣经（不可违背设定，会参与大纲/分章/续写）",
+        font=("Microsoft YaHei UI", 11, "bold"),
+        bg="#f5f5f7",
+        fg="#333333",
+    ).pack(anchor="w")
+
+    bible_text = scrolledtext.ScrolledText(
+        container,
+        wrap=tk.WORD,
+        height=22,
+        font=("Microsoft YaHei UI", 10),
+        bg="#ffffff",
+        fg="#333333",
+        padx=10,
+        pady=10,
+    )
+    bible_text.pack(fill=tk.BOTH, expand=True, pady=(8, 12))
+    bible_text.insert(tk.END, story_bible_cache or _default_story_bible_template())
+
+    tk.Label(
+        container,
+        text="风格/人称/节奏约束（会强制用于每个场景与编辑润色）",
+        font=("Microsoft YaHei UI", 11, "bold"),
+        bg="#f5f5f7",
+        fg="#333333",
+    ).pack(anchor="w")
+
+    style_text = scrolledtext.ScrolledText(
+        container,
+        wrap=tk.WORD,
+        height=5,
+        font=("Microsoft YaHei UI", 10),
+        bg="#ffffff",
+        fg="#333333",
+        padx=10,
+        pady=10,
+    )
+    style_text.pack(fill=tk.X, pady=(8, 12))
+    style_text.insert(tk.END, style_guide_cache)
+
+    btn_row = tk.Frame(container, bg="#f5f5f7")
+    btn_row.pack(fill=tk.X, pady=(5, 0))
+
+    def _save_and_close():
+        global story_bible_cache, style_guide_cache
+        story_bible_cache = bible_text.get("1.0", tk.END).strip()
+        style_guide_cache = style_text.get("1.0", tk.END).strip() or style_guide_cache
+        save_long_novel_defaults(story_bible_cache, style_guide_cache)
+        update_status("已保存：故事圣经/风格约束")
+        win.destroy()
+
+    tk.Button(
+        btn_row,
+        text="保存",
+        command=_save_and_close,
+        font=("Microsoft YaHei UI", 10, "bold"),
+        bg="#007aff",
+        fg="white",
+        relief=tk.RAISED,
+        bd=0,
+        padx=18,
+        pady=8,
+        cursor="hand2",
+    ).pack(side=tk.LEFT, padx=6)
+
+    tk.Button(
+        btn_row,
+        text="取消",
+        command=win.destroy,
+        font=("Microsoft YaHei UI", 10, "bold"),
+        bg="#8e8e93",
+        fg="white",
+        relief=tk.RAISED,
+        bd=0,
+        padx=18,
+        pady=8,
+        cursor="hand2",
+    ).pack(side=tk.LEFT, padx=6)
 
 # 处理本次生成的内容
 def process_text_chunk(text_chunk):
@@ -192,7 +362,7 @@ def process_text_chunk(text_chunk):
     return story_content
 
 # 生成文本的线程函数
-def generate_text_thread():
+def generate_text_thread_legacy():
     global generated_content, thinking_content, is_generating, update_timer
     
     try:
@@ -332,6 +502,143 @@ def periodic_status_update():
             root.after_cancel(update_timer)
             update_timer = None
 
+
+# ===== 长篇分章管线：生成线程 =====
+def _append_log(text: str):
+    try:
+        thinking_text.insert(tk.END, f"\n[LOG] {text}\n")
+        thinking_text.see(tk.END)
+    except Exception:
+        pass
+
+
+def generate_text_thread():
+    """长篇模式：分章/分场景生成 + 每章摘要记忆 + 每章评估。"""
+    global generated_content, thinking_content, is_generating, current_novel_id, current_novel_state
+
+    try:
+        user_prompt = prompt_entry.get("1.0", tk.END).strip()
+        try:
+            target_word_count = int(word_count_entry.get())
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的目标字数")
+            is_generating = False
+            return
+
+        # 清空显示区域
+        output_text.delete(1.0, tk.END)
+        thinking_text.delete(1.0, tk.END)
+        generated_content = ""
+        thinking_content = ""
+
+        # 读取长篇配置
+        story_bible = (story_bible_cache or _default_story_bible_template()).strip()
+        style_guide = (style_guide_cache or "").strip() or "第三人称限知；节奏紧凑；少复述前情。"
+
+        # 新建或续写工程
+        selected = novel_selector.get().strip() if "novel_selector" in globals() else ""
+        resume = bool(resume_var.get()) if "resume_var" in globals() else False
+
+        state = None
+        if resume and selected and selected.startswith("novel_"):
+            state = novel_store.load_state(selected)
+            if state:
+                # 允许用户更新“写作要求/圣经/风格”，用于后续续写（不回改已生成章节）
+                state.requirement = user_prompt or state.requirement
+                state.target_words = target_word_count or state.target_words
+                state.story_bible = story_bible or state.story_bible
+                state.style_guide = style_guide or state.style_guide
+                novel_store.save_state(state)
+        if not state:
+            state = novel_store.create_new(
+                requirement=user_prompt,
+                target_words=target_word_count,
+                story_bible=story_bible,
+                style_guide=style_guide,
+            )
+            # 刷新工程下拉框（UI线程执行）
+            if "novel_selector" in globals():
+                try:
+                    root.after(0, lambda: (novel_selector.config(values=novel_store.list_novels()), novel_selector.set(state.novel_id)))
+                except Exception:
+                    pass
+
+        current_novel_id = state.novel_id
+        current_novel_state = state
+        update_status(f"长篇工程就绪：{current_novel_id}（将分章生成并自动存盘）")
+
+        # 管线参数（面向长篇：默认 30 章）
+        try:
+            chapters_n = int(chapters_entry.get()) if "chapters_entry" in globals() else 30
+        except Exception:
+            chapters_n = 30
+        try:
+            scene_words = int(scene_words_entry.get()) if "scene_words_entry" in globals() else 900
+        except Exception:
+            scene_words = 900
+        try:
+            scenes_per_ch = int(scenes_per_chapter_entry.get()) if "scenes_per_chapter_entry" in globals() else 4
+        except Exception:
+            scenes_per_ch = 4
+
+        models = PipelineModels(
+            planner=writing_model_name,
+            writer=writing_model_name,
+            editor=writing_model_name,
+            evaluator=evaluation_model_name,
+        )
+        cfg = PipelineConfig(
+            chapters=chapters_n,
+            scenes_per_chapter_default=scenes_per_ch,
+            scene_words=scene_words,
+            tail_chars=1200,
+        )
+        pipeline = LongNovelPipeline(ollama_client, novel_store, models, cfg)
+
+        def _is_cancelled():
+            return not is_generating
+
+        def _on_raw_chunk(raw: str):
+            global generated_content
+            if not raw:
+                return
+            story_chunk = process_text_chunk(raw)
+            if story_chunk:
+                output_text.insert(tk.END, story_chunk)
+                output_text.see(tk.END)
+                generated_content += story_chunk
+            root.update_idletasks()
+
+        def _log(msg: str):
+            logger.info(msg)
+            _append_log(msg)
+
+        pipeline.run(
+            state=current_novel_state,
+            on_story_chunk=_on_raw_chunk,
+            on_think_chunk=lambda _: None,
+            is_cancelled=_is_cancelled,
+            log=_log,
+        )
+
+        # 尝试刷新 state（章节/记忆可能已更新）
+        current_novel_state = novel_store.load_state(current_novel_id) or current_novel_state
+
+        if is_generating:
+            update_status(f"长篇生成完成/暂停点已保存：{current_novel_id}")
+        else:
+            update_status(f"已停止生成（工程已保存，可续写）：{current_novel_id}")
+
+    except Exception as e:
+        logger.exception("长篇生成过程出错")
+        try:
+            output_text.insert(tk.END, f"Error: {str(e)}\n")
+        except Exception:
+            pass
+        update_status("长篇生成过程出错")
+    finally:
+        is_generating = False
+
 # 调用模型并更新显示区域的函数
 def generate_text():
     global generated_content, is_generating, update_timer
@@ -346,7 +653,28 @@ def generate_text():
     periodic_status_update()
     
     # 创建一个新线程来执行生成过程
-    thread = threading.Thread(target=generate_text_thread)
+    use_long = True
+    if "long_mode_var" in globals():
+        try:
+            use_long = bool(long_mode_var.get())
+        except Exception:
+            use_long = True
+
+    thread_target = generate_text_thread if use_long else generate_text_thread_legacy
+    thread = threading.Thread(target=thread_target)
+    thread.daemon = True
+    thread.start()
+
+
+def generate_text_legacy():
+    """旧版：全文续写（用于自动生成/快速短篇）。"""
+    global is_generating
+    if is_generating:
+        messagebox.showinfo("提示", "正在生成中，请稍候...")
+        return
+    is_generating = True
+    periodic_status_update()
+    thread = threading.Thread(target=generate_text_thread_legacy)
     thread.daemon = True
     thread.start()
 
@@ -369,7 +697,7 @@ def auto_generate():
     
     # 开始第一轮生成
     if generate_user_prompt():
-        generate_text()
+        generate_text_legacy()
 
 # 停止自动生成
 def stop_auto_generate():
@@ -387,9 +715,24 @@ def toggle_auto_generate():
 
 # 评估小说质量的函数
 def evaluate_novel_quality():
-    global is_evaluating
+    global is_evaluating, evaluation_target_text, evaluation_target_title
     
-    if not generated_content.strip():
+    # 长篇模式：优先评估“最新一章”
+    eval_text = generated_content
+    eval_title = "当前内容"
+    try:
+        if current_novel_state and current_novel_state.chapters:
+            last = current_novel_state.chapters[-1]
+            idx = int(last.get("idx", 0))
+            title = (last.get("title") or "").strip()
+            chapter_text = novel_store.load_chapter_text(current_novel_state.novel_id, idx).strip()
+            if chapter_text:
+                eval_text = chapter_text
+                eval_title = f"第{idx}章{('：' + title) if title else ''}"
+    except Exception:
+        pass
+
+    if not (eval_text or "").strip():
         logger.warning("尝试评估空内容")
         messagebox.showinfo("提示", "请先生成小说内容再进行评估")
         return
@@ -399,8 +742,10 @@ def evaluate_novel_quality():
         messagebox.showinfo("提示", "正在评估中，请稍候...")
         return
     
-    content_length = len(generated_content)
-    logger.info(f"开始评估小说质量，内容长度: {content_length} 字符")
+    evaluation_target_text = eval_text
+    evaluation_target_title = eval_title
+    content_length = len(evaluation_target_text)
+    logger.info(f"开始评估小说质量：{evaluation_target_title}，内容长度: {content_length} 字符")
     
     is_evaluating = True
     update_status("正在评估小说质量...")
@@ -440,6 +785,10 @@ def evaluate_novel_thread():
     try:
         logger.info("开始小说质量评估过程")
         user_prompt = prompt_entry.get("1.0", tk.END).strip()
+        content = (evaluation_target_text or generated_content or "").strip()
+        title = evaluation_target_title or "当前内容"
+        # 避免提示词过长导致评估失真：最多带 8000 字符左右
+        content_for_prompt = content if len(content) <= 8000 else (content[:8000] + "……（后续省略）")
         
         # 构造评估提示词
         evaluation_prompt = f'''
@@ -453,8 +802,11 @@ def evaluate_novel_thread():
         ## 用户的写作要求:
         {user_prompt}
         
+        ## 评估对象:
+        {title}
+
         ## 小说内容:
-        {generated_content[:2000]}...（内容较长，此处截断）
+        {content_for_prompt}
         
         请给出详细评价，并提出具体的改进建议。评分标准为1-10分，请在每个方面打分，并给出总体评分。
         格式要求:
@@ -482,7 +834,7 @@ def evaluate_novel_thread():
             "temperature": 0.3,  # 使用较低的温度以获得更客观的评估
             "stream": False,
             "options": {
-                "num_ctx": 4096  # 增加上下文窗口大小
+                "num_ctx": 8192  # 评估章节时需要更大上下文
             }
         }
         
@@ -1010,6 +1362,9 @@ root.title("AI 长篇小说写作助手")
 root.geometry("1000x800")
 root.configure(bg='#f5f5f7')  # 更新为浅灰背景色
 
+# 先加载长篇默认“故事圣经/风格约束”
+load_long_novel_defaults()
+
 # 设置样式
 style = ttk.Style()
 style.configure('TFrame', background='#f5f5f7')
@@ -1105,7 +1460,97 @@ word_count_entry = tk.Entry(
     bg='#f9f9f9'
 )
 word_count_entry.pack(side=tk.TOP, anchor='w', pady=(0, 8))
-word_count_entry.insert(0, "3000")
+word_count_entry.insert(0, "100000")
+
+# 长篇模式开关（默认开启）
+long_mode_var = tk.BooleanVar(value=True)
+tk.Checkbutton(
+    settings_frame,
+    text="长篇分章模式（推荐）",
+    variable=long_mode_var,
+    bg="#ffffff",
+    fg="#333333",
+    font=("Microsoft YaHei UI", 10, "bold"),
+    activebackground="#ffffff",
+).pack(side=tk.TOP, anchor="w", pady=(0, 10))
+
+# 续写/选择工程
+resume_var = tk.BooleanVar(value=True)
+tk.Checkbutton(
+    settings_frame,
+    text="续写已有工程",
+    variable=resume_var,
+    bg="#ffffff",
+    fg="#333333",
+    font=("Microsoft YaHei UI", 10),
+    activebackground="#ffffff",
+).pack(side=tk.TOP, anchor="w", pady=(0, 6))
+
+tk.Label(
+    settings_frame,
+    text="选择工程：",
+    font=("Microsoft YaHei UI", 10, "bold"),
+    bg="#ffffff",
+    fg="#333333",
+).pack(side=tk.TOP, anchor="w", pady=(0, 6))
+
+novel_selector = ttk.Combobox(
+    settings_frame,
+    width=18,
+    values=novel_store.list_novels(),
+)
+novel_selector.pack(side=tk.TOP, anchor="w", pady=(0, 10))
+if novel_store.list_novels():
+    novel_selector.set(novel_store.list_novels()[0])
+
+# 长篇参数：章数 / 每章场景数 / 场景字数
+tk.Label(
+    settings_frame,
+    text="章数（长篇建议 20-60）：",
+    font=("Microsoft YaHei UI", 10, "bold"),
+    bg="#ffffff",
+    fg="#333333",
+).pack(side=tk.TOP, anchor="w", pady=(0, 6))
+chapters_entry = tk.Entry(settings_frame, width=15, font=("Microsoft YaHei UI", 10), relief=tk.SOLID, bd=1, bg="#f9f9f9")
+chapters_entry.pack(side=tk.TOP, anchor="w", pady=(0, 8))
+chapters_entry.insert(0, "30")
+
+tk.Label(
+    settings_frame,
+    text="每章场景数（建议 3-6）：",
+    font=("Microsoft YaHei UI", 10, "bold"),
+    bg="#ffffff",
+    fg="#333333",
+).pack(side=tk.TOP, anchor="w", pady=(0, 6))
+scenes_per_chapter_entry = tk.Entry(settings_frame, width=15, font=("Microsoft YaHei UI", 10), relief=tk.SOLID, bd=1, bg="#f9f9f9")
+scenes_per_chapter_entry.pack(side=tk.TOP, anchor="w", pady=(0, 8))
+scenes_per_chapter_entry.insert(0, "4")
+
+tk.Label(
+    settings_frame,
+    text="单场景字数（建议 800-1400）：",
+    font=("Microsoft YaHei UI", 10, "bold"),
+    bg="#ffffff",
+    fg="#333333",
+).pack(side=tk.TOP, anchor="w", pady=(0, 6))
+scene_words_entry = tk.Entry(settings_frame, width=15, font=("Microsoft YaHei UI", 10), relief=tk.SOLID, bd=1, bg="#f9f9f9")
+scene_words_entry.pack(side=tk.TOP, anchor="w", pady=(0, 10))
+scene_words_entry.insert(0, "900")
+
+# 故事圣经/风格约束编辑
+tk.Button(
+    settings_frame,
+    text="编辑故事圣经",
+    command=open_story_bible_editor,
+    font=("Microsoft YaHei UI", 10, "bold"),
+    bg="#5856d6",
+    fg="white",
+    relief=tk.RAISED,
+    bd=0,
+    padx=10,
+    pady=6,
+    cursor="hand2",
+).pack(side=tk.TOP, anchor="w", pady=(0, 6))
 
 # 创建控制按钮区域，使用卡片式设计
 button_card = tk.Frame(main_container, bg='#ffffff', relief=tk.RAISED, bd=1)
